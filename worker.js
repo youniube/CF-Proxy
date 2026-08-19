@@ -8,242 +8,308 @@ const RAW_URL = "https://raw.githubusercontent.com/sinspired/CF-Proxy/main";
 const SITE_NAME = "CF Proxy - 通用代理加速";
 
 // 需要注入 GitHub Token 的主机列表
-const GITHUB_HOSTS = ['api.github.com', 'uploads.github.com'];
+const GITHUB_HOSTS = ["api.github.com", "uploads.github.com"];
 
 // 需要手动处理的重定向状态码
 const REDIRECT_CODES = new Set([301, 302, 303, 307, 308]);
 
-addEventListener('fetch', event => {
-    event.respondWith(handleRequest(event.request));
+addEventListener("fetch", (event) => {
+  event.respondWith(handleRequest(event.request));
 });
 
 // HTML 节点重写器，用于将页面内的相对链接改为代理链接
 class DOMRewriter {
-    constructor(proxyOrigin, targetBaseUrl) {
-        this.proxyOrigin = proxyOrigin;
-        this.targetBaseUrl = targetBaseUrl;
+  constructor(proxyOrigin, targetBaseUrl) {
+    this.proxyOrigin = proxyOrigin;
+    this.targetBaseUrl = targetBaseUrl;
+  }
+  rewrite(element, attr) {
+    const val = element.getAttribute(attr);
+    // 忽略空值、锚点、JS脚本和 Base64 图片
+    if (
+      !val ||
+      val.startsWith("javascript:") ||
+      val.startsWith("mailto:") ||
+      val.startsWith("data:") ||
+      val.startsWith("#")
+    )
+      return;
+    try {
+      // 将相对路径解析为目标域的绝对路径 (如 /index.php -> https://xyy.com/index.php)
+      const absUrl = new URL(val, this.targetBaseUrl).toString();
+      // 拼上代理的前缀
+      element.setAttribute(attr, `${this.proxyOrigin}/${absUrl}`);
+    } catch (e) {
+      // 解析失败（比如存在语法错误的URL）则保持原样
     }
-    rewrite(element, attr) {
-        const val = element.getAttribute(attr);
-        // 忽略空值、锚点、JS脚本和 Base64 图片
-        if (!val || val.startsWith('javascript:') || val.startsWith('mailto:') || val.startsWith('data:') || val.startsWith('#')) return;
-        try {
-            // 将相对路径解析为目标域的绝对路径 (如 /index.php -> https://xyy.com/index.php)
-            const absUrl = new URL(val, this.targetBaseUrl).toString();
-            // 拼上代理的前缀
-            element.setAttribute(attr, `${this.proxyOrigin}/${absUrl}`);
-        } catch (e) {
-            // 解析失败（比如存在语法错误的URL）则保持原样
-        }
-    }
-    element(element) {
-        if (element.tagName === 'a') this.rewrite(element, 'href');
-        if (element.tagName === 'img') this.rewrite(element, 'src');
-        if (element.tagName === 'link') this.rewrite(element, 'href');
-        if (element.tagName === 'script') this.rewrite(element, 'src');
-        if (element.tagName === 'form') this.rewrite(element, 'action');
-        if (element.tagName === 'iframe') this.rewrite(element, 'src');
-    }
+  }
+  element(element) {
+    if (element.tagName === "a") this.rewrite(element, "href");
+    if (element.tagName === "img") this.rewrite(element, "src");
+    if (element.tagName === "link") this.rewrite(element, "href");
+    if (element.tagName === "script") this.rewrite(element, "src");
+    if (element.tagName === "form") this.rewrite(element, "action");
+    if (element.tagName === "iframe") this.rewrite(element, "src");
+  }
 }
 
 async function handleRequest(request) {
-    const url = new URL(request.url);
+  const url = new URL(request.url);
 
-    // 1. 根目录与静态资源
-    if (url.pathname === "/") {
-        return new Response(getHtml(url.host), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-    }
-    if (url.pathname === '/favicon.ico' || url.pathname === '/favicon.svg') {
-        return new Response(getLogoSvg(), { headers: { 'Content-Type': 'image/svg+xml' } });
-    }
-    if (url.pathname === '/preview.png') {
-        return fetch(`${RAW_URL}/preview.png`);
-    }
-    if (url.pathname === '/CF-Proxy_OG.png') {
-        return fetch(`${RAW_URL}/CF-Proxy_OG.png`);
-    }
+  // 1. 根目录与静态资源
+  if (url.pathname === "/") {
+    return new Response(getHtml(url.host), {
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
+  if (url.pathname === "/favicon.ico" || url.pathname === "/favicon.svg") {
+    return new Response(getLogoSvg(), {
+      headers: { "Content-Type": "image/svg+xml" },
+    });
+  }
+  if (url.pathname === "/preview.png") {
+    return fetch(`${RAW_URL}/preview.png`);
+  }
+  if (url.pathname === "/CF-Proxy_OG.png") {
+    return fetch(`${RAW_URL}/CF-Proxy_OG.png`);
+  }
 
-    // 2. 内部 API: 纯 Server-Side 网络连通性验证
-    if (url.pathname === '/__proxy_check') {
-        const domain = url.searchParams.get('domain');
-        if (!domain) return new Response(JSON.stringify({ Status: -1, msg: 'Missing domain' }), { status: 400 });
-        try {
-            const hostname = domain.split(':')[0];
-            const dnsHeaders = { 'accept': 'application/dns-json' };
-            const [ipv4Resp, ipv6Resp] = await Promise.all([
-                fetch(`https://cloudflare-dns.com/dns-query?name=${hostname}&type=A`, { headers: dnsHeaders }),
-                fetch(`https://cloudflare-dns.com/dns-query?name=${hostname}&type=AAAA`, { headers: dnsHeaders })
-            ]);
-            const [ipv4, ipv6] = await Promise.all([ipv4Resp.json(), ipv6Resp.json()]);
-            const hasIpv4 = ipv4.Status === 0 && ipv4.Answer && ipv4.Answer.length > 0;
-            const hasIpv6 = ipv6.Status === 0 && ipv6.Answer && ipv6.Answer.length > 0;
-            const status = (hasIpv4 || hasIpv6) ? 0 : 3;
-            return new Response(JSON.stringify({ Status: status }), {
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-            });
-        } catch (e) {
-            return new Response(JSON.stringify({ Status: -1, error: e.message }), {
-                headers: { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' }
-            });
-        }
-    }
-
-    // 测试 GitHub Token 配置状态
-    // if (url.pathname === '/__debug_gh') {
-    //     const ghToken = getGhToken();
-    //     const info = {
-    //         token_configured: !!ghToken,
-    //         // 只暴露前8位用于确认是正确的 Token，后面隐藏以防泄露
-    //         token_prefix: ghToken ? ghToken.substring(0, 8) + '...' : null,
-    //     };
-
-    //     // 如果 token 存在，实际测一下 GitHub API 的剩余配额
-    //     if (ghToken) {
-    //         try {
-    //             const resp = await fetch('https://api.github.com/rate_limit', {
-    //                 headers: {
-    //                     'Authorization': `Bearer ${ghToken}`,
-    //                     'User-Agent': 'CF-Proxy/Worker'
-    //                 }
-    //             });
-    //             const data = await resp.json();
-    //             info.rate_limit = data.rate;
-    //         } catch (e) {
-    //             info.rate_limit_error = e.message;
-    //         }
-    //     }
-    //     return new Response(JSON.stringify(info, null, 2), {
-    //         headers: { 'Content-Type': 'application/json' }
-    //     });
-    // }
-
-    // 3. 代理逻辑解析
-    let actualUrlStr = url.pathname.slice(1) + url.search;
-
-    // Referer 子路径补偿
-    // 用于修复页面内 JS 发起的相对路径 AJAX 请求，或 CSS 文件内未被 HTMLRewriter 拦截的相对资源
-    const referer = request.headers.get('Referer');
-    // 如果存在 Referer 且当前请求看起来像是一个相对路径资源 (没有 http 前缀)
-    if (referer && !actualUrlStr.startsWith('http')) {
-        try {
-            const refererUrl = new URL(referer);
-            // 只有当请求是由我们的代理服务发出的（且不在主页）
-            if (refererUrl.hostname === url.hostname && refererUrl.pathname.length > 1) {
-                let refTarget = refererUrl.pathname.slice(1);
-                if (!refTarget.startsWith('http')) {
-                    if (refTarget.includes('.')) refTarget = 'https://' + refTarget;
-                }
-                const baseTargetUrl = new URL(refTarget);
-                // 把类似于 /index.php 组合拼装回真实域名的地址
-                const resolvedTarget = new URL(url.pathname + url.search, baseTargetUrl).toString();
-                // 自动纠正：302 重定向到正确的代理地址
-                return Response.redirect(`${url.origin}/${resolvedTarget}`, 302);
-            }
-        } catch (e) {
-            // 解析失败忽略，继续走原有流程
-        }
-    }
-
-    // 智能补全协议逻辑
-    if (!actualUrlStr.startsWith('http')) {
-        if (actualUrlStr.includes('.') && !actualUrlStr.startsWith('favicon')) {
-            actualUrlStr = 'https://' + actualUrlStr;
-        } else {
-            return new Response(getHtml(url.host), { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
-        }
-    }
-
+  // 2. 内部 API: 纯 Server-Side 网络连通性验证
+  if (url.pathname === "/__proxy_check") {
+    const domain = url.searchParams.get("domain");
+    if (!domain)
+      return new Response(
+        JSON.stringify({ Status: -1, msg: "Missing domain" }),
+        { status: 400 },
+      );
     try {
-        const targetUrl = new URL(actualUrlStr);
-        // 构建请求头，添加必要的 Host、Referer、Origin 等字段
-        const newHeaders = new Headers(request.headers);
-        newHeaders.set('Host', targetUrl.host);
-        newHeaders.set('Referer', targetUrl.origin);
-        newHeaders.set('Origin', targetUrl.origin);
-
-        // 删除可能暴露用户真实 IP 的字段
-        ['cf-connecting-ip', 'cf-ipcountry', 'x-forwarded-for', 'x-real-ip'].forEach(h => newHeaders.delete(h));
-
-        // GitHub Token 注入
-        if (GITHUB_HOSTS.includes(targetUrl.hostname)) {
-            // 使用 globalThis 安全访问 Workers 环境变量，避免 ReferenceError
-            const ghToken = getGhToken();
-            if (ghToken) {
-                newHeaders.set('Authorization', `Bearer ${ghToken}`);
-                console.log('[CF-Proxy] GitHub Token injected for:', targetUrl.hostname);
-            } else {
-                // Token 未配置或为空，记录警告（在 Workers Dashboard 日志可见）
-                console.warn('[CF-Proxy] GH_TOKEN is not set or empty, GitHub rate limit may apply.');
-            }
-            // GitHub API 要求必须有合法的 User-Agent
-            newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36');
-        } else {
-            if (!newHeaders.get('User-Agent')) {
-                newHeaders.set('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36');
-            }
-        }
-
-        const response = await fetch(new Request(targetUrl.toString(), {
-            headers: newHeaders,
-            method: request.method,
-            body: request.body,
-            redirect: 'manual' // 手动处理重定向非常关键
-        }));
-
-        // 处理重定向，保持在代理路径下
-        if (REDIRECT_CODES.has(response.status)) {
-            const location = response.headers.get('location');
-            if (location) {
-                const redirectUrl = new URL(location, targetUrl).toString();
-                return Response.redirect(`${url.origin}/${redirectUrl}`, response.status);
-            }
-        }
-
-        const responseHeaders = new Headers(response.headers);
-        responseHeaders.set('Access-Control-Allow-Origin', '*');
-        responseHeaders.set('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-        responseHeaders.set('Access-Control-Allow-Headers', '*');
-        responseHeaders.delete('Content-Security-Policy');
-        responseHeaders.delete('X-Frame-Options');
-
-        let finalResponse = new Response(response.body, {
-            status: response.status,
-            statusText: response.statusText,
-            headers: responseHeaders
-        });
-
-        // 实时重写 HTML 中的链接
-        const contentType = responseHeaders.get('Content-Type') || '';
-        if (contentType.toLowerCase().includes('text/html')) {
-            // 当内容是网页时，通过 HTMLRewriter 重写所有的资源链接和 a 标签，使之保持在代理下
-            finalResponse = new HTMLRewriter()
-                .on('a, img, link, script, form, iframe', new DOMRewriter(url.origin, targetUrl.toString()))
-                .transform(finalResponse);
-        }
-
-        return finalResponse;
+      const hostname = domain.split(":")[0];
+      const dnsHeaders = { accept: "application/dns-json" };
+      const [ipv4Resp, ipv6Resp] = await Promise.all([
+        fetch(`https://cloudflare-dns.com/dns-query?name=${hostname}&type=A`, {
+          headers: dnsHeaders,
+        }),
+        fetch(
+          `https://cloudflare-dns.com/dns-query?name=${hostname}&type=AAAA`,
+          { headers: dnsHeaders },
+        ),
+      ]);
+      const [ipv4, ipv6] = await Promise.all([
+        ipv4Resp.json(),
+        ipv6Resp.json(),
+      ]);
+      const hasIpv4 =
+        ipv4.Status === 0 && ipv4.Answer && ipv4.Answer.length > 0;
+      const hasIpv6 =
+        ipv6.Status === 0 && ipv6.Answer && ipv6.Answer.length > 0;
+      const status = hasIpv4 || hasIpv6 ? 0 : 3;
+      return new Response(JSON.stringify({ Status: status }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
     } catch (e) {
-        return new Response(getErrorHtml(e.message, actualUrlStr), {
-            status: 500,
-            headers: { 'Content-Type': 'text/html; charset=utf-8' }
-        });
+      return new Response(JSON.stringify({ Status: -1, error: e.message }), {
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+        },
+      });
     }
+  }
+
+  // 测试 GitHub Token 配置状态
+  // if (url.pathname === '/__debug_gh') {
+  //     const ghToken = getGhToken();
+  //     const info = {
+  //         token_configured: !!ghToken,
+  //         // 只暴露前8位用于确认是正确的 Token，后面隐藏以防泄露
+  //         token_prefix: ghToken ? ghToken.substring(0, 8) + '...' : null,
+  //     };
+
+  //     // 如果 token 存在，实际测一下 GitHub API 的剩余配额
+  //     if (ghToken) {
+  //         try {
+  //             const resp = await fetch('https://api.github.com/rate_limit', {
+  //                 headers: {
+  //                     'Authorization': `Bearer ${ghToken}`,
+  //                     'User-Agent': 'CF-Proxy/Worker'
+  //                 }
+  //             });
+  //             const data = await resp.json();
+  //             info.rate_limit = data.rate;
+  //         } catch (e) {
+  //             info.rate_limit_error = e.message;
+  //         }
+  //     }
+  //     return new Response(JSON.stringify(info, null, 2), {
+  //         headers: { 'Content-Type': 'application/json' }
+  //     });
+  // }
+
+  // 3. 代理逻辑解析
+  let actualUrlStr = url.pathname.slice(1) + url.search;
+
+  // Referer 子路径补偿
+  // 用于修复页面内 JS 发起的相对路径 AJAX 请求，或 CSS 文件内未被 HTMLRewriter 拦截的相对资源
+  const referer = request.headers.get("Referer");
+  // 如果存在 Referer 且当前请求看起来像是一个相对路径资源 (没有 http 前缀)
+  if (referer && !actualUrlStr.startsWith("http")) {
+    try {
+      const refererUrl = new URL(referer);
+      // 只有当请求是由我们的代理服务发出的（且不在主页）
+      if (
+        refererUrl.hostname === url.hostname &&
+        refererUrl.pathname.length > 1
+      ) {
+        let refTarget = refererUrl.pathname.slice(1);
+        if (!refTarget.startsWith("http")) {
+          if (refTarget.includes(".")) refTarget = "https://" + refTarget;
+        }
+        const baseTargetUrl = new URL(refTarget);
+        // 把类似于 /index.php 组合拼装回真实域名的地址
+        const resolvedTarget = new URL(
+          url.pathname + url.search,
+          baseTargetUrl,
+        ).toString();
+        // 自动纠正：302 重定向到正确的代理地址
+        return Response.redirect(`${url.origin}/${resolvedTarget}`, 302);
+      }
+    } catch (e) {
+      // 解析失败忽略，继续走原有流程
+    }
+  }
+
+  // 智能补全协议逻辑
+  if (!actualUrlStr.startsWith("http")) {
+    if (actualUrlStr.includes(".") && !actualUrlStr.startsWith("favicon")) {
+      actualUrlStr = "https://" + actualUrlStr;
+    } else {
+      return new Response(getHtml(url.host), {
+        headers: { "Content-Type": "text/html; charset=utf-8" },
+      });
+    }
+  }
+
+  try {
+    const targetUrl = new URL(actualUrlStr);
+    // 构建请求头，添加必要的 Host、Referer、Origin 等字段
+    const newHeaders = new Headers(request.headers);
+    newHeaders.set("Host", targetUrl.host);
+    newHeaders.set("Referer", targetUrl.origin);
+    newHeaders.set("Origin", targetUrl.origin);
+
+    // 删除可能暴露用户真实 IP 的字段
+    [
+      "cf-connecting-ip",
+      "cf-ipcountry",
+      "x-forwarded-for",
+      "x-real-ip",
+    ].forEach((h) => newHeaders.delete(h));
+
+    // GitHub Token 注入
+    if (GITHUB_HOSTS.includes(targetUrl.hostname)) {
+      // 使用 globalThis 安全访问 Workers 环境变量，避免 ReferenceError
+      const ghToken = getGhToken();
+      if (ghToken) {
+        newHeaders.set("Authorization", `Bearer ${ghToken}`);
+        console.log(
+          "[CF-Proxy] GitHub Token injected for:",
+          targetUrl.hostname,
+        );
+      } else {
+        // Token 未配置或为空，记录警告（在 Workers Dashboard 日志可见）
+        console.warn(
+          "[CF-Proxy] GH_TOKEN is not set or empty, GitHub rate limit may apply.",
+        );
+      }
+      // GitHub API 要求必须有合法的 User-Agent
+      newHeaders.set(
+        "User-Agent",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+      );
+    } else {
+      if (!newHeaders.get("User-Agent")) {
+        newHeaders.set(
+          "User-Agent",
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/110.0.0.0 Safari/537.36",
+        );
+      }
+    }
+
+    const response = await fetch(
+      new Request(targetUrl.toString(), {
+        headers: newHeaders,
+        method: request.method,
+        body: request.body,
+        redirect: "manual", // 手动处理重定向非常关键
+      }),
+    );
+
+    // 处理重定向，保持在代理路径下
+    if (REDIRECT_CODES.has(response.status)) {
+      const location = response.headers.get("location");
+      if (location) {
+        const redirectUrl = new URL(location, targetUrl).toString();
+        return Response.redirect(
+          `${url.origin}/${redirectUrl}`,
+          response.status,
+        );
+      }
+    }
+
+    const responseHeaders = new Headers(response.headers);
+    responseHeaders.set("Access-Control-Allow-Origin", "*");
+    responseHeaders.set(
+      "Access-Control-Allow-Methods",
+      "GET, POST, PUT, DELETE, OPTIONS",
+    );
+    responseHeaders.set("Access-Control-Allow-Headers", "*");
+    responseHeaders.delete("Content-Security-Policy");
+    responseHeaders.delete("X-Frame-Options");
+
+    let finalResponse = new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: responseHeaders,
+    });
+
+    // 实时重写 HTML 中的链接
+    const contentType = responseHeaders.get("Content-Type") || "";
+    if (contentType.toLowerCase().includes("text/html")) {
+      // 当内容是网页时，通过 HTMLRewriter 重写所有的资源链接和 a 标签，使之保持在代理下
+      finalResponse = new HTMLRewriter()
+        .on(
+          "a, img, link, script, form, iframe",
+          new DOMRewriter(url.origin, targetUrl.toString()),
+        )
+        .transform(finalResponse);
+    }
+
+    return finalResponse;
+  } catch (e) {
+    return new Response(getErrorHtml(e.message, actualUrlStr), {
+      status: 500,
+      headers: { "Content-Type": "text/html; charset=utf-8" },
+    });
+  }
 }
 
 // 安全读取 GitHub Token 环境变量（避免 ReferenceError）
 function getGhToken() {
-    return (typeof globalThis.GH_TOKEN === 'string' && globalThis.GH_TOKEN.trim())
-        ? globalThis.GH_TOKEN.trim()
-        : null;
+  return typeof globalThis.GH_TOKEN === "string" && globalThis.GH_TOKEN.trim()
+    ? globalThis.GH_TOKEN.trim()
+    : null;
 }
 
 // favicon 使用简洁版本
 function getLogoSvg() {
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#01af7b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="#01af7b" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><line x1="2" y1="12" x2="22" y2="12"></line><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"></path></svg>`;
 }
 
 function getErrorHtml(errorMsg, targetUrl) {
-    return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="zh-CN" id="htmlRoot">
 <head>
     <meta charset="UTF-8">
@@ -272,7 +338,7 @@ function getErrorHtml(errorMsg, targetUrl) {
 }
 
 function getHtml(host) {
-    return `<!DOCTYPE html>
+  return `<!DOCTYPE html>
 <html lang="zh-CN" id="htmlRoot">
 <head>
     <meta charset="UTF-8">
@@ -921,6 +987,11 @@ function getHtml(host) {
             margin-top: 8px;
             opacity: 0.7;
         }
+        
+        .digitalplat{
+            margin-top: 8px;
+            opacity: 0.5;
+        }
 
         /* 大屏*/
         @media (min-width: 1024px) {
@@ -1139,9 +1210,20 @@ function getHtml(host) {
 </div>
 
 <footer>
-    <p>Project <a href="${REPO_URL}" target="_blank">CF-Proxy</a> by <a href="https://github.com/sinspired" target="_blank">sinspired</a></p>
+    <p>
+        Project <a href="${REPO_URL}" target="_blank">CF-Proxy</a> by
+        <a href="https://github.com/sinspired" target="_blank">sinspired</a>
+    </p>
     <p class="disclaimer">仅供技术研究与合法用途使用，请勿用于非法行为</p>
+    
+    <p class="digitalplat">
+        <a href="https://dashboard.digitalplat.org/signup?ref=HZcosTVlmQ" target="_blank">
+            <img src="https://img.shields.io/badge/DigitalPlat-提供域名支持-000000?style=flat-square&logo=databricks&logoColor=ffffff"
+                 alt="DigitalPlat 免费域名注册">
+        </a>
+    </p>
 </footer>
+
 
 <script>
     let dnsTimer;

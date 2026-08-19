@@ -106,6 +106,16 @@ wrangler dev
 
 Worker 会自动添加 `Access-Control-Allow-Origin: *` 等头部，你可以在前端项目中直接将其作为 CORS 代理使用。
 
+## 🌍 域名相关
+
+> [!TIP] 
+> cloudflare 分配域名无法访问，需配置自定义域名，可自行注册或点击下方链接注册免费域名
+>
+> [![域名注册](https://img.shields.io/badge/DigitalPlat-注册免费域名-2563eb?style=flat-square&logo=databricks&logoColor=ffffff)](https://dashboard.digitalplat.org/signup?ref=HZcosTVlmQ)
+
+> [!CAUTION]
+> 请勿用于非法用途！
+
 ## ⚠️ 免责声明
 
 > [!IMPORTANT]
